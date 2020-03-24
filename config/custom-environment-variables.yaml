@@ -1,0 +1,13 @@
+logging:
+  level: LOGGING_LEVEL
+
+endpoint:
+  rootUrl: ROOT_URL
+
+mongo:
+  url: MONGO_URL
+
+downloads:
+  parallelDirFetches: PARALLEL_DIR_FETCHES
+  parallelDownloads: PARALLEL_DOWNLOADS
+  saveTo: DOWNLOAD_PATH

@@ -1,0 +1,18 @@
+logging:
+  level: debug
+
+endpoint:
+  rootUrl: https://thetrove.net
+  timestampFile: /include/timestamp.txt
+  treeFile: /include/tree.json
+
+mongo:
+  url: mongodb://localhost:27017/admin
+  directoriesColName: directories
+  filesColName: files
+
+downloads:
+  parallelDirFetches: 15
+  parallelDownloads: 10
+  saveTo: ./cache/download
+

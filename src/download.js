@@ -9,14 +9,15 @@ import cliProgress from 'cli-progress';
 import PQueue from 'p-queue';
 import { DownloaderHelper } from 'node-downloader-helper';
 import axios from 'axios';
+import fileSizeParser from 'filesize-parser';
 
 import log from './logger';
 
-const PAD_SIZE = 8;
+const PAD_SIZE = 10;
 
 const multiBar = new cliProgress.MultiBar(
   {
-    format: '|{bar}| {percentage}% || {speed} || {curSize} / {totalSize} || {fileName} || ETA: {eta_formatted}',
+    format: '{bar} {percentage}%  {speed}  {curSize} / {totalSize}  {fileName}  ETA: {eta_formatted}',
     etaBuffer: 50,
     clearOnComplete: true,
     autopadding: true,
@@ -24,14 +25,14 @@ const multiBar = new cliProgress.MultiBar(
   cliProgress.Presets.shades_classic,
 );
 
-function filesize(size, end = false) {
-  return _[`pad${end ? 'End' : 'Start'}`](filesizeJs(size), PAD_SIZE);
+function filesize(size, end = false, speed = false) {
+  return _[`pad${end ? 'End' : 'Start'}`](speed ? `${filesizeJs(size)}/s` : filesizeJs(size), PAD_SIZE);
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // eslint-disable-next-line
-async function downloadFileSim(file) {
+async function downloadFileSim(db, file) {
   // log.debug('STARTED: %s (%s)', file.fileName, filesize(file.size));
   const parallelDownloads = config.get('downloads.parallelDownloads');
 
@@ -74,17 +75,18 @@ async function downloadFileSim(file) {
   // log.debug('STOPPED: %s (%s)', file.fileName, filesize(file.size));
 }
 
-async function downloadFile(file) {
+async function downloadFile(db, file) {
   const saveToBase = config.get('downloads.saveTo');
   const fileDir = path.join(saveToBase, file.directory._id);
   const filePath = path.join(fileDir, file.fileName);
+  const filesCol = db.collection(config.get('mongo.filesColName'));
 
   return new Promise(async (resolve) => {
     let fileBar = null;
 
     let finished = false;
 
-    const finish = async (finalSize) => {
+    const finish = (finalSize) => {
       if (finished || !fileBar) {
         return;
       }
@@ -96,10 +98,9 @@ async function downloadFile(file) {
         curSize: filesize(finalSize),
       });
 
-      await sleep(100);
-
       fileBar.stop();
       multiBar.remove(fileBar);
+      fileBar = null;
     };
 
     if (!fs.existsSync(fileDir)) {
@@ -116,6 +117,13 @@ async function downloadFile(file) {
         const stat = fs.statSync(filePath);
         if (stat.size === fileSize) {
           shouldDownload = false;
+
+          await filesCol.updateOne({ _id: file._id }, {
+            $set: {
+              downloaded: true,
+              size: fileSize,
+            },
+          });
         }
       }
     } catch (error) {
@@ -129,6 +137,15 @@ async function downloadFile(file) {
         override: true,
       });
 
+      const fileBarUpdateThrottled = _.throttle((stats) => {
+        if (fileBar) {
+          fileBar.update(stats.downloaded, {
+            curSize: filesize(stats.downloaded),
+            speed: filesize(stats.speed, false, true),
+          });
+        }
+      }, 150, { leading: false, trailing: true });
+
       dl.on('download', (downloadInfo) => {
         if (finished) return;
 
@@ -136,30 +153,60 @@ async function downloadFile(file) {
           fileName: file.fileName,
           totalSize: filesize(downloadInfo.totalSize, true),
           curSize: filesize(0),
-          speed: `${filesize(0)}/s`,
+          speed: filesize(0, false, true),
         });
       });
 
       dl.on('progress', (stats) => {
         if (finished) return;
 
-        fileBar.update(stats.downloaded, {
-          curSize: filesize(stats.downloaded),
-          speed: `${filesize(stats.speed)}/s`,
-        });
+        fileBarUpdateThrottled(stats);
       });
 
-      // dl.on('error', (error) => {
-      //   // log.error('ERROR: %s\n%o', file.url, error);
-      // });
+      dl.on('timeout', (stats) => {
+        if (fileBar) {
+          fileBar.update(file.size, {
+            fileName: `${file.fileName} (TIMEOUT)`,
+          });
+        }
+      });
 
-      // dl.once('end', async (downloadInfo) => {
-      //   // log.debug('CARAAAAAAAAAAAAAAAAAAAAAIIII %s %o', downloadInfo);
-      // });
+      dl.on('error', (error) => {
+        if (fileBar) {
+          fileBar.update(file.size, {
+            fileName: `${file.fileName} (ERROR)`,
+          });
+        }
 
-      // dl.on('retry', (error) => {
-      //   // log.error('ERROR: %s\n%o', file.url, error);
-      // });
+        dl.stop();
+        finish(file.size);
+      });
+
+      dl.once('end', async (downloadInfo) => {
+        if (fileBar) {
+          fileBar.update(downloadInfo.totalSize, {
+            curSize: filesize(downloadInfo.totalSize),
+            fileName: `${file.fileName} (ENDED)`,
+          });
+        }
+
+        await filesCol.updateOne({ _id: file._id }, {
+          $set: {
+            downloaded: true,
+            size: downloadInfo.totalSize,
+          },
+        });
+
+        finish(file.size);
+      });
+
+      dl.on('retry', (error) => {
+        if (fileBar) {
+          fileBar.update(file.size, {
+            fileName: `${file.fileName} (RETRY)`,
+          });
+        }
+      });
 
       try {
         await dl.start();
@@ -167,14 +214,21 @@ async function downloadFile(file) {
         // log.debug('ERRORRRR: %o', error);
       }
 
-      await finish(file.size);
+      if (fileBar) {
+        fileBar.update(file.size, {
+          fileName: `${file.fileName} (FINISHED)`,
+          totalSize: filesize(file.size, true),
+        });
+      }
+
       resolve();
     } else {
-      await finish(file.size);
       resolve();
     }
   });
 }
+
+const FILES_REGEX = /^Books\/Dungeons/;
 
 /** @param {import('mongodb').Db} db */
 export async function downloadFiles(db) {
@@ -190,18 +244,24 @@ export async function downloadFiles(db) {
   const filesCol = db.collection(config.get('mongo.filesColName'));
 
   const matchFilter = {
+    _id: { $regex: FILES_REGEX },
     downloaded: { $ne: true },
-    _id: { $regex: /^Books/ },
+    size: { $lt: fileSizeParser('1 GB') },
   };
 
-  const { totalSize, numFiles } = _.first(
-    await filesCol
-      .aggregate([
-        { $match: matchFilter },
-        { $group: { _id: null, totalSize: { $sum: '$size' }, numFiles: { $sum: 1 } } },
-      ])
-      .toArray(),
-  );
+  const totals = await filesCol
+    .aggregate([
+      { $match: matchFilter },
+      { $group: { _id: null, totalSize: { $sum: '$size' }, numFiles: { $sum: 1 } } },
+    ])
+    .toArray();
+
+  if (!totals.length) {
+    log.info('No files to download');
+    return;
+  }
+
+  const { totalSize, numFiles } = _.first(totals);
 
   log.info('Total files size is %s for %s files', filesize(totalSize), numFiles);
 
@@ -228,11 +288,15 @@ export async function downloadFiles(db) {
   let handling = false;
 
   const totalsBar = multiBar.create(totalSize, 0, {
-    curSize: _.padStart(filesDone, PAD_SIZE),
-    totalSize: _.padEnd(numFiles, PAD_SIZE),
-    fileName: 'Total files',
-    speed: 'N/A',
+    // curSize: _.padStart(filesDone, PAD_SIZE),
+    // totalSize: _.padEnd(numFiles, PAD_SIZE),
+    curSize: filesize(0),
+    totalSize: filesize(totalSize, true),
+    fileName: 'All files',
+    speed: _.padStart('N/A', PAD_SIZE),
   });
+
+  let pollInterval = null;
 
   await new Promise(async (resolve) => {
     const handleNextFile = async () => {
@@ -244,12 +308,13 @@ export async function downloadFiles(db) {
 
             if (file.size > 0) {
               queue
-                .add(() => downloadFile(file))
+                .add(() => downloadFile(db, file))
                 .then(() => {
                   filesDone += 1;
                   sizeDone += file.size;
                   totalsBar.update(sizeDone, {
-                    curSize: _.padStart(filesDone, PAD_SIZE),
+                    fileName: `Total files (${numFiles - filesDone} left)`,
+                    curSize: filesize(sizeDone),
                   });
 
                   _.defer(() => handleNextFile());
@@ -264,14 +329,20 @@ export async function downloadFiles(db) {
         }
         handling = false;
       } else {
-        _.defer(() => handleNextFile());
+        setTimeout(() => handleNextFile(), 20);
       }
     };
 
     for (let i = 0; i < parallelDownloads * 10; i += 1) {
       await handleNextFile();
     }
+
+    pollInterval = setInterval(() => {
+      handleNextFile();
+    }, 2000);
   });
+
+  clearInterval(pollInterval);
 
   totalsBar.stop();
   multiBar.remove(totalsBar);

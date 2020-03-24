@@ -9,6 +9,7 @@ import moment from 'moment';
 import scrapeIt from 'scrape-it';
 import fileSizeParser from 'filesize-parser';
 import cliProgress from 'cli-progress';
+import unescape from 'unescape';
 
 import log from './logger';
 
@@ -46,29 +47,44 @@ async function checkTimestamp() {
 async function scrapeFilesData(remoteUrl) {
   // log.verbose('Scrapping %s ...', remoteUrl);
 
-  const { data } = await scrapeIt(remoteUrl, {
-    files: {
-      listItem: '.litem.file',
-      data: {
-        fileName: {
-          selector: '.litem_name',
+  let data;
+  let retry = 3;
+
+  while (retry) {
+    try {
+      const { data: scrapeData } = await scrapeIt(remoteUrl, {
+        files: {
+          listItem: '.litem.file',
+          data: {
+            fileName: {
+              selector: '.litem_name',
+            },
+            url: {
+              selector: '.litem_name > a',
+              attr: 'href',
+              convert: (val) => url.resolve(remoteUrl, val),
+            },
+            lastModified: {
+              selector: '.litem_modified',
+              convert: (val) => moment(val).toDate(),
+            },
+            size: {
+              selector: '.litem_size',
+              convert: (val) => fileSizeParser(val),
+            },
+          },
         },
-        url: {
-          selector: '.litem_name > a',
-          attr: 'href',
-          convert: (val) => url.resolve(remoteUrl, val),
-        },
-        lastModified: {
-          selector: '.litem_modified',
-          convert: (val) => moment(val).toDate(),
-        },
-        size: {
-          selector: '.litem_size',
-          convert: (val) => fileSizeParser(val),
-        },
-      },
-    },
-  });
+      });
+
+      data = scrapeData;
+      break;
+    } catch (error) {
+      retry -= 1;
+      if (!retry) {
+        throw error;
+      }
+    }
+  }
 
   // if (data.files.length) {
   //   log.verbose('%s files found.', data.files.length);
@@ -82,10 +98,12 @@ async function scrapeFilesData(remoteUrl) {
 function genDirectoriesUrlsRec(curTree, curPath) {
   const links = [];
 
-  const { type, name, contents } = curTree;
+  const { type, name: escapedName, contents } = curTree;
+  const name = unescape(escapedName);
 
   if (type === 'directory') {
     const finalPath = path.join(curPath, name);
+
     links.push({
       path: finalPath,
       url: encodeURI(`${ROOT_URL}/${finalPath}/index.html`),

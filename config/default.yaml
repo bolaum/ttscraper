@@ -12,7 +12,6 @@ mongo:
   filesColName: files
 
 downloads:
-  parallelDirFetches: 15
-  parallelDownloads: 10
+  parallelDirFetches: 10
+  parallelDownloads: 5
   saveTo: ./cache/download
-

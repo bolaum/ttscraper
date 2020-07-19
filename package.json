@@ -19,7 +19,7 @@
     "filesize-parser": "^1.5.0",
     "filesize.js": "^2.0.0",
     "js-yaml": "^3.13.1",
-    "lodash": "^4.17.15",
+    "lodash": "^4.17.19",
     "moment": "^2.24.0",
     "mongodb": "^3.5.5",
     "node-downloader-helper": "^1.0.12",

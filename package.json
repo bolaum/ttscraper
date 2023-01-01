@@ -14,7 +14,7 @@
   "dependencies": {
     "axios": "^0.19.2",
     "cli-progress": "^3.6.0",
-    "config": "^3.3.0",
+    "config": "^3.3.8",
     "esm": "^3.2.25",
     "filesize-parser": "^1.5.0",
     "filesize.js": "^2.0.0",
